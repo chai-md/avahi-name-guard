@@ -1,54 +1,59 @@
 # avahi-name-guard
 
-DGX Spark で mDNS 名が `foo.local` から `foo-2.local` に変わってしまう問題を、自動で元に戻す仕組みです。
+English | [日本語](README.ja.md)
 
-## 何が起きているか
+Automatically restores the mDNS host name on DGX Spark (or any Linux host running avahi) when avahi renames it from `foo.local` to `foo-2.local`.
 
-avahi-daemon は「同じ名前が既にネットワーク上にある」と判断すると、`-2`, `-3` … を付けて改名します（RFC 6762 の衝突解決）。
-同名の別ホストがいなくても、**同じホストが同じネットワークに複数のインターフェースで出ている**と、自分自身の告知を他人のものと誤認して改名することがあります（avahi の既知の問題）。
+## What is happening
 
-DGX Spark はこの条件を満たしやすい構成です。
+When avahi-daemon believes its name is already taken on the network, it renames itself with `-2`, `-3`, … (RFC 6762 conflict resolution).
+Even with no other host using the same name, avahi can mistake **its own announcements** for someone else's when the host is on the same network through **multiple interfaces**, and rename itself (a known avahi issue).
 
-- 有線 10GbE（通常 `enP7s7`）と Wi-Fi（通常 `wlP9s9`）が同じ LAN につながっている
-- ConnectX-7 は物理 1 ポートあたり netdev が 2 本見える（`enp1s0f0np0` と `enP2p1s0f0np0` など）
-- IPv6 アドレスが追加・変化するたびに再告知される
-- docker0 などのブリッジ
+DGX Spark is particularly prone to this:
 
-## 仕組み
+- Wired 10GbE (usually `enP7s7`) and Wi-Fi (usually `wlP9s9`) connected to the same LAN
+- ConnectX-7 exposes two netdevs per physical port (e.g. `enp1s0f0np0` and `enP2p1s0f0np0`)
+- Re-announcements every time an IPv6 address is added or changes
+- Bridges such as docker0
 
-| 層 | 内容 |
+## How it works
+
+| Layer | What it does |
 |---|---|
-| 自動修復 | systemd タイマーで 30 秒ごとに avahi の現在名を D-Bus で確認。ズレていたら `SetHostName` で戻し、だめなら avahi-daemon を再起動 |
-| 安全装置 | 本来の名前を**別ホストが本当に使っている**場合（解決結果が自分のアドレスでない）は戻さず警告だけ出す |
-| フラップ防止 | 修正は 1 時間に 6 回まで。超えたら原因対策を促すログを出して止まる |
-| 原因対策（任意） | `install.sh --auto-iface` / `--iface` で avahi が使うインターフェースを限定、`--no-ipv6` で IPv6 を無効化 |
+| Auto-repair | A systemd timer checks avahi's current host name over D-Bus every 30 s. If it has drifted, it is restored with `SetHostName`; if that fails, avahi-daemon is restarted |
+| Safety check | If the original name is **really in use by another host** (it resolves to an address that is not ours), the name is left alone and only a warning is logged |
+| Flap protection | At most 6 fixes per hour. Beyond that it logs a message asking you to fix the root cause and stops |
+| Root-cause fix (optional) | `install.sh --auto-iface` / `--iface` restricts the interfaces avahi uses; `--no-ipv6` disables IPv6 in avahi |
 
-avahi-utils は不要で、`busctl`（systemd 標準）だけで動きます。
+No avahi-utils needed — it only uses `busctl` (part of systemd).
 
-## 導入
+## Install
 
-各 Spark で:
+On each host:
 
 ```bash
-tar xzf avahi-name-guard.tar.gz && cd avahi-name-guard
+git clone https://github.com/chai-md/avahi-name-guard && cd avahi-name-guard
+# or: tar xzf avahi-name-guard.tar.gz && cd avahi-name-guard
 
-# まず監視だけ入れる
+# Start with the watchdog only
 sudo ./install.sh
 
-# 再発が多ければ原因側も絞る（デフォルトルートのIFだけで mDNS を出す）
+# If renames keep recurring, also restrict avahi (publish only on the default-route interface)
 sudo ./install.sh --auto-iface
-# IF を明示する場合（ip -br addr で名前を確認）
+# Or specify interfaces explicitly (check names with: ip -br addr)
 sudo ./install.sh --iface enP7s7
 ```
 
-`--auto-iface` / `--iface` を使うと、avahi-daemon.conf の `allow-interfaces=` を書き換えます（元のファイルは `.bak.日時` で残します）。
+`--auto-iface` / `--iface` rewrites `allow-interfaces=` in avahi-daemon.conf (the original is kept as `.bak.<timestamp>`).
 
-> **注意**: ConnectX-7 経由の mDNS（NVIDIA のクラスタ検出スクリプトなど）を使っている場合、LAN だけに絞ると検出できなくなります。その場合は LAN 側と、**物理ポートごとに 1 本だけ**を指定してください。
-> 例: `--iface enP7s7,enp1s0f0np0,enp1s0f1np1`（`enP2p…` 側の重複 netdev は外す）
+> **Note**: If you rely on mDNS over ConnectX-7 (e.g. NVIDIA's cluster discovery scripts), restricting avahi to the LAN only will break discovery. In that case, list the LAN interface plus **only one netdev per physical port**.
+> Example: `--iface enP7s7,enp1s0f0np0,enp1s0f1np1` (leave out the duplicate `enP2p…` netdevs)
 
-## 複数台へまとめて展開
+After installation the cloned/extracted directory is no longer needed; everything is copied to `/usr/local/sbin` and `/etc/systemd/system`. Keep it if you want to use `./install.sh --uninstall` later.
 
-mDNS 名が壊れている最中でも届くように、Tailscale 名か IP で:
+## Deploying to multiple hosts
+
+Use Tailscale names or IP addresses so it works even while mDNS names are broken:
 
 ```bash
 for h in foo bar baz; do
@@ -57,18 +62,38 @@ for h in foo bar baz; do
 done
 ```
 
-## 確認・調査
+## Checking and troubleshooting
 
 ```bash
-journalctl -t avahi-name-guard -f              # 修復ログ
-systemctl list-timers avahi-name-guard.timer   # タイマー状態
-journalctl -u avahi-daemon | grep -E 'conflict|Registering new address'  # 改名の直前に何が起きたか
+journalctl -t avahi-name-guard -f              # repair log
+systemctl list-timers avahi-name-guard.timer   # timer status
+journalctl -u avahi-daemon | grep -E 'conflict|Registering new address'  # what happened right before a rename
 ```
 
-`Host name conflict, retrying with foo-2` の直前の `Registering new address record … on <IF>` を見ると、どのインターフェースが引き金になっているかが分かります。
+Look at the `Registering new address record … on <IF>` lines just before `Host name conflict, retrying with foo-2` to see which interface triggers the rename.
 
-## 削除
+## Configuration
+
+Edit `/etc/systemd/system/avahi-name-guard.service` (or use `systemctl edit avahi-name-guard.service`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_FIX_PER_HOUR` | 6 | Maximum repairs per hour before giving up |
+| `SETTLE_SEC` | 6 | Seconds to wait after each repair step before re-checking |
+| `WANT_NAME` | static host name | Name to restore (without `.local`) |
+
+## Uninstall
 
 ```bash
 sudo ./install.sh --uninstall
 ```
+
+Or manually:
+
+```bash
+sudo systemctl disable --now avahi-name-guard.timer
+sudo rm -f /etc/systemd/system/avahi-name-guard.{service,timer} /usr/local/sbin/avahi-name-guard
+sudo systemctl daemon-reload
+```
+
+To revert avahi settings, restore `/etc/avahi/avahi-daemon.conf.bak.*` and run `sudo systemctl restart avahi-daemon`.

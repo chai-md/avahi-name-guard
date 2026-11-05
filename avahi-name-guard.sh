@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # avahi-name-guard
-#   avahi-daemon が自己衝突などで "<host>-2.local" に改名した場合に、
-#   本来のホスト名 "<host>.local" へ自動で戻す。
-#   - 本当に別ホストが同名を使っている場合は戻さない（警告のみ）
-#   - 1時間あたりの修正回数に上限を設け、フラップ時は原因対策を促す
-#   依存: systemd(busctl), iproute2, avahi-daemon（avahi-utils は不要）
+#   When avahi-daemon renames itself to "<host>-2.local" (e.g. due to a
+#   self-conflict), restore the original name "<host>.local".
+#   - Does nothing if another host really owns the name (warning only)
+#   - Limits fixes per hour; on flapping, asks you to fix the root cause
+#   Requires: systemd (busctl), iproute2, avahi-daemon (avahi-utils not needed)
 set -uo pipefail
 
 TAG=avahi-name-guard
@@ -26,26 +26,26 @@ want=${want%%.*}
 
 cur=$(get_name)
 if [[ -z "$cur" ]]; then
-  log "avahi の D-Bus に接続できません（スキップ）"
+  log "Cannot reach avahi over D-Bus (skipping)"
   exit 0
 fi
 [[ "$cur" == "$want" ]] && exit 0
 
-log "mDNS名が ${cur}.local になっています（期待値 ${want}.local）"
+log "mDNS name is ${cur}.local (expected ${want}.local)"
 
-# --- 本当に別ホストが want.local を名乗っていないか確認 ---
+# --- Make sure no other host really owns want.local ---
 own_addrs=$(ip -o addr show | awk '{split($4,a,"/"); print a[1]}')
 if out=$("${AV[@]}" ResolveHostName iisiu -1 -1 "${want}.local" -1 0 2>/dev/null); then
-  # 出力例: iisisu 2 0 "foo.local" 0 "192.0.2.10" 0
+  # Example output: iisisu 2 0 "foo.local" 0 "192.0.2.10" 0
   addr=$(awk '{print $6}' <<<"$out" | tr -d '"')
   addr=${addr%%%*}
   if [[ -n "$addr" ]] && ! grep -qxF "$addr" <<<"$own_addrs"; then
-    log "警告: ${want}.local は別ホスト (${addr}) が使用中です。名前は戻しません。"
+    log "WARNING: ${want}.local is in use by another host (${addr}). Not restoring."
     exit 0
   fi
 fi
 
-# --- 修正回数の上限（フラップ対策） ---
+# --- Rate limit (flap protection) ---
 mkdir -p "$STATE_DIR"
 now=$(date +%s)
 hist="$STATE_DIR/fixes"
@@ -53,25 +53,25 @@ touch "$hist"
 awk -v t=$((now - 3600)) '$1 > t' "$hist" > "$hist.tmp" && mv "$hist.tmp" "$hist"
 count=$(wc -l < "$hist")
 if (( count >= MAX_FIX_PER_HOUR )); then
-  log "直近1時間で ${count} 回修正済み。改名が繰り返されています。avahi の対象インターフェースを絞ってください（install.sh --auto-iface 等）。"
+  log "Already fixed ${count} times in the last hour; renames keep recurring. Restrict avahi's interfaces (e.g. install.sh --auto-iface)."
   exit 0
 fi
 echo "$now" >> "$hist"
 
-# --- 1段目: D-Bus で名前を戻す ---
+# --- Step 1: restore the name over D-Bus ---
 "${AV[@]}" SetHostName s "$want" >/dev/null 2>&1
 sleep "$SETTLE_SEC"
 if [[ "$(get_name)" == "$want" ]]; then
-  log "${want}.local に戻しました（SetHostName）"
+  log "Restored ${want}.local (SetHostName)"
   exit 0
 fi
 
-# --- 2段目: avahi-daemon を再起動 ---
+# --- Step 2: restart avahi-daemon ---
 systemctl restart avahi-daemon
 sleep "$SETTLE_SEC"
 if [[ "$(get_name)" == "$want" ]]; then
-  log "${want}.local に戻しました（avahi-daemon 再起動）"
+  log "Restored ${want}.local (avahi-daemon restart)"
 else
-  log "戻せませんでした（現在: $(get_name).local）。原因側の設定を確認してください。"
+  log "Could not restore (current: $(get_name).local). Check the root cause."
 fi
 exit 0

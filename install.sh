@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# avahi-name-guard インストーラ
+# avahi-name-guard installer
 #
-#   sudo ./install.sh                     # 監視タイマーのみ導入
-#   sudo ./install.sh --auto-iface        # + avahi をデフォルトルートのIFに限定
-#   sudo ./install.sh --iface enP7s7      # + avahi を指定IFに限定（カンマ区切り可）
-#   sudo ./install.sh --no-ipv6           # + avahi の IPv6 を無効化
-#   sudo ./install.sh --uninstall         # 削除（avahi 設定はバックアップから手動で戻す）
+#   sudo ./install.sh                     # install the watchdog timer only
+#   sudo ./install.sh --auto-iface        # + restrict avahi to the default-route interface
+#   sudo ./install.sh --iface enP7s7      # + restrict avahi to given interfaces (comma-separated)
+#   sudo ./install.sh --no-ipv6           # + disable IPv6 in avahi
+#   sudo ./install.sh --uninstall         # remove (restore avahi config from backup manually)
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -20,22 +20,22 @@ while (( $# )); do
     --auto-iface) IFACES=$(ip route show default | awk '/^default/ {print $5; exit}'); shift ;;
     --no-ipv6) NO_IPV6=1; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
-    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
-    *) echo "不明なオプション: $1" >&2; exit 1 ;;
+    -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
-[[ $EUID -eq 0 ]] || { echo "sudo で実行してください" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || { echo "Please run with sudo" >&2; exit 1; }
 
 if (( UNINSTALL )); then
   systemctl disable --now avahi-name-guard.timer 2>/dev/null || true
   rm -f /etc/systemd/system/avahi-name-guard.{service,timer} /usr/local/sbin/avahi-name-guard
   systemctl daemon-reload
-  echo "削除しました。avahi 設定を戻す場合は ${CONF}.bak.* を参照してください。"
+  echo "Removed. To revert avahi settings, see ${CONF}.bak.*"
   exit 0
 fi
 
-# avahi-daemon.conf の [server] セクションに key=value を設定
+# Set key=value in the [server] section of avahi-daemon.conf
 set_conf() {
   local key=$1 val=$2
   if grep -qE "^#?[[:space:]]*${key}=" "$CONF"; then
@@ -47,18 +47,18 @@ set_conf() {
 
 conf_changed=0
 if [[ -n "$IFACES" || $NO_IPV6 -eq 1 ]]; then
-  [[ -f "$CONF" ]] || { echo "$CONF がありません" >&2; exit 1; }
+  [[ -f "$CONF" ]] || { echo "$CONF not found" >&2; exit 1; }
   cp -a "$CONF" "${CONF}.bak.$(date +%Y%m%d%H%M%S)"
   if [[ -n "$IFACES" ]]; then
     for i in ${IFACES//,/ }; do
-      ip link show "$i" >/dev/null 2>&1 || { echo "インターフェース $i が見つかりません" >&2; exit 1; }
+      ip link show "$i" >/dev/null 2>&1 || { echo "Interface $i not found" >&2; exit 1; }
     done
     set_conf allow-interfaces "$IFACES"
-    echo "avahi を ${IFACES} に限定しました"
+    echo "Restricted avahi to: ${IFACES}"
   fi
   if (( NO_IPV6 )); then
     set_conf use-ipv6 no
-    echo "avahi の IPv6 を無効化しました"
+    echo "Disabled IPv6 in avahi"
   fi
   conf_changed=1
 fi
@@ -71,5 +71,5 @@ systemctl enable --now avahi-name-guard.timer
 
 sleep 2
 /usr/local/sbin/avahi-name-guard || true
-echo "現在の mDNS 名: $(busctl --system -- call org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetHostName 2>/dev/null | sed -E 's/^s "(.*)"$/\1/').local"
-echo "ログ確認: journalctl -t avahi-name-guard -f"
+echo "Current mDNS name: $(busctl --system -- call org.freedesktop.Avahi / org.freedesktop.Avahi.Server GetHostName 2>/dev/null | sed -E 's/^s "(.*)"$/\1/').local"
+echo "Logs: journalctl -t avahi-name-guard -f"

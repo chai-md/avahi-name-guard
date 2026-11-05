@@ -6,6 +6,6 @@ Requisite=avahi-daemon.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/avahi-name-guard
-# 必要なら上限値などを変更
+# Adjust limits here if needed (see README)
 #Environment=MAX_FIX_PER_HOUR=6
 #Environment=SETTLE_SEC=6
