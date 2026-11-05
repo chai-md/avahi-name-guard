@@ -1,0 +1,11 @@
+[Unit]
+Description=Restore avahi mDNS host name when it drifts to <host>-N.local
+After=avahi-daemon.service
+Requisite=avahi-daemon.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/avahi-name-guard
+# 必要なら上限値などを変更
+#Environment=MAX_FIX_PER_HOUR=6
+#Environment=SETTLE_SEC=6
